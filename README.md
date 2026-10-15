@@ -22,6 +22,8 @@ Open `index.html` in a browser. It is one file, with no install, no build step a
 | Arrow keys, then Enter | Plants without a mouse |
 | P | Saves a picture of the garden |
 
+Every ring is labelled with its note (G3, A3, B3…), and the labels change with the scale. When a flower sings, a ♪ rises from it with the note's name, or ♫ when it plays as part of a chord. Point at an empty spot and you see the note you would plant there.
+
 It respects the "reduce motion" setting by turning off the pollen and keeping pulses small.
 
 ## How it works

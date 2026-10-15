@@ -84,7 +84,7 @@ canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none;cursor:cr
 const TAU = Math.PI * 2, STEPS = 16, RINGS = 8, LOOKAHEAD = 0.12, BASE = 196; // G3
 const SCALES = [
   { name: "Pentatonic", notes: [0, 2, 4, 7, 9, 12, 14, 16], hue: 265 },
-  { name: "Hirajoshi",  notes: [0, 2, 3, 7, 8, 12, 14, 15], hue: 180 },
+  { name: "Hirajoshi",  notes: [0, 2, 3, 7, 8, 12, 14, 15], hue: 180, flats: true },
   { name: "Lydian",     notes: [0, 4, 6, 7, 11, 12, 16, 18], hue: 28 },
 ];
 const TEMPOS = [72, 90, 108, 126];
@@ -95,13 +95,20 @@ const $ = id => document.getElementById(id);
 const flowers = new Map();             // key = step*RINGS+ring
 let scaleIdx = 0, tempoIdx = 1, playing = true, dream = false;
 let nextStep = 0, nextT = 0, pausedPhase = 0;
-let events = [], ripples = [], particles = [], chords = [], stars = [];
+let events = [], ripples = [], particles = [], chords = [], stars = [], floaters = [];
+let hover = null;
 let lastBeat = -9, dispHue = SCALES[0].hue;
 const cursor = { step: 0, ring: 3, show: false };
 const key = (s, r) => s * RINGS + r;
 const rand = n => Math.floor(Math.random() * n);
 const vnow = () => performance.now() / 1000;
 const stepDur = () => 60 / TEMPOS[tempoIdx] / 2;
+const SHARPS = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+const FLATS  = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
+function noteName(ring) {                // BASE is G3, MIDI 55
+  const sc = SCALES[scaleIdx], m = 55 + sc.notes[ring];
+  return (sc.flats ? FLATS : SHARPS)[m % 12] + (Math.floor(m / 12) - 1);
+}
 
 // ---------- layout ----------
 const cv = $("garden"), g = cv.getContext("2d");
@@ -194,7 +201,7 @@ function fireStep(s, at) {
   const level = 1 / Math.sqrt(Math.max(1, here.length));
   for (const f of here) {
     voice(f.ring, at, Math.cos(stepA(s)) * 0.7, level);
-    events.push({ type: "hit", k: key(f.step, f.ring), at });
+    events.push({ type: "hit", k: key(f.step, f.ring), at, chord: here.length > 1 });
   }
   if (here.length > 1) events.push({ type: "chord", ks: here.map(f => key(f.step, f.ring)), at });
   if (s % 4 === 0) events.push({ type: "beat", at });
@@ -292,6 +299,7 @@ function frame() {
       f.hit = now;
       const [x, y] = pos(f), hue = hueOf(f.step, f.ring);
       ripples.push({ x, y, t: now, hue });
+      floaters.push({ x, y, t: now, hue, glyph: e.chord ? "♫" : "♪", name: noteName(f.ring) });
       if (!reduce) for (let j = 0; j < 7; j++) {
         const a = Math.random() * TAU, v = 14 + Math.random() * 34;
         particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 8, t: now, hue });
@@ -325,6 +333,16 @@ function frame() {
     const a = stepA(s), rr = ringR(r);
     g.beginPath(); g.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, s % 4 === 0 ? 1.6 : 1.1, 0, TAU); g.fill();
   }
+  // each ring's note, written in the gap just before the top of the circle
+  const cell = (R - r0) / RINGS, la = stepA(0) - TAU / STEPS / 2;
+  g.font = `500 ${Math.round(Math.min(11, cell * 0.55))}px ui-rounded, system-ui, sans-serif`;
+  g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "rgba(236,233,255,.34)";
+  for (let r = 0; r < RINGS; r++) {
+    const near = [0, STEPS - 1].some(s => { const f = flowers.get(key(s, r)); return f && f.dying < 0; });
+    g.globalAlpha = near ? 0.25 : 1;     // step aside for a flower planted next to the label
+    g.fillText(noteName(r), cx + Math.cos(la) * ringR(r), cy + Math.sin(la) * ringR(r));
+  }
+  g.globalAlpha = 1;
 
   // the sun's sweep
   const ang = stepA(0) + phase() * TAU, trail = 1.15;
@@ -364,7 +382,6 @@ function frame() {
   }
 
   // flowers
-  const cell = (R - r0) / RINGS;
   for (const [k, f] of flowers) {
     let grow = Math.max(0, Math.min(1, (now - f.born) / 0.9));
     grow = 1 - (1 - grow) ** 3;
@@ -404,6 +421,22 @@ function frame() {
     g.beginPath(); g.arc(p.x, p.y, 1.4, 0, TAU); g.fill();
   }
 
+  // notes floating up from flowers as they sing
+  g.globalCompositeOperation = "source-over";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const n = floaters[i], k = (now - n.t) / 1.6;
+    if (k >= 1) { floaters.splice(i, 1); continue; }
+    const y = n.y - 16 - (reduce ? 0 : k * 34), a = (1 - k) ** 1.5;
+    g.fillStyle = `hsla(${n.hue},90%,82%,${a})`;
+    g.font = `${Math.round(15 + 3 * (1 - k))}px ui-rounded, system-ui, sans-serif`;
+    g.fillText(n.glyph, n.x + (reduce ? 0 : Math.sin(k * 5 + n.x) * 4), y);
+    g.font = "600 10px ui-rounded, system-ui, sans-serif";
+    g.fillStyle = `rgba(255,255,255,${0.85 * a})`;
+    g.fillText(n.name, n.x, y - 15);
+  }
+  g.globalCompositeOperation = "lighter";
+
   // the seed at the centre (tap it to pause)
   const bp = Math.exp(-(now - lastBeat) * 5) * (playing ? 1 : 0);
   const cr = r0 * (0.55 + 0.12 * bp);
@@ -417,12 +450,19 @@ function frame() {
     g.fillRect(cx + cr * 0.12, cy - cr * 0.34, cr * 0.2, cr * 0.68);
   }
 
-  // keyboard cursor
-  if (cursor.show) {
-    const a = stepA(cursor.step), rr = ringR(cursor.ring);
-    g.setLineDash([3, 4]); g.strokeStyle = "rgba(255,217,160,.85)"; g.lineWidth = 1.5;
-    g.beginPath(); g.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, Math.min(cell * 0.5, 18), 0, TAU); g.stroke();
-    g.setLineDash([]);
+  // keyboard cursor, or the mouse hovering a spot: show the note it would play
+  const aim = cursor.show ? cursor : (!painting && hover) || null;
+  if (aim) {
+    const a = stepA(aim.step), rr = ringR(aim.ring), x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+    const rad = Math.min(cell * 0.5, 18), live = flowers.get(key(aim.step, aim.ring));
+    g.setLineDash([3, 4]); g.strokeStyle = `rgba(255,217,160,${cursor.show ? 0.85 : 0.5})`; g.lineWidth = 1.5;
+    g.beginPath(); g.arc(x, y, rad, 0, TAU); g.stroke(); g.setLineDash([]);
+    const label = noteName(aim.ring) + (live && live.dying < 0 ? "  ×" : "");
+    g.font = "600 11px ui-rounded, system-ui, sans-serif";
+    const w = g.measureText(label).width + 14, ly = y - rad - 13;
+    g.fillStyle = "rgba(20,20,36,.82)"; g.beginPath();
+    g.roundRect ? g.roundRect(x - w / 2, ly - 9, w, 18, 9) : g.rect(x - w / 2, ly - 9, w, 18); g.fill();
+    g.fillStyle = "#ffd9a0"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(label, x, ly + 0.5);
   }
   requestAnimationFrame(frame);
 }
@@ -452,6 +492,7 @@ cv.addEventListener("pointerdown", e => {
   cv.setPointerCapture(e.pointerId);
 });
 cv.addEventListener("pointermove", e => {
+  if (e.pointerType === "mouse") { const c = cellAt(e.clientX, e.clientY); hover = c && c !== "core" ? c : null; }
   if (!painting) return;
   const c = cellAt(e.clientX, e.clientY);
   if (c && c !== "core") paint(c);
@@ -459,6 +500,7 @@ cv.addEventListener("pointermove", e => {
 const endPaint = () => { if (painting) saveHash(); painting = null; };
 cv.addEventListener("pointerup", endPaint);
 cv.addEventListener("pointercancel", endPaint);
+cv.addEventListener("pointerleave", () => { hover = null; });
 function paint(c) {
   const k = key(c.step, c.ring);
   if (k === lastCell) return;
