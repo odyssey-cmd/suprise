@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#07080f">
+<title>Sound Garden</title>
+<style>
+:root{
+  --bg:#07080f;
+  --ink:#ece9ff;
+  --dim:#9a96b8;
+  --glass:rgba(20,20,36,.55);
+  --line:rgba(255,255,255,.12);
+  --accent:#ffd9a0;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+  font:15px/1.45 ui-rounded,"SF Pro Rounded",system-ui,-apple-system,"Segoe UI",sans-serif;
+  overflow:hidden;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}
+
+#hint{position:fixed;top:max(16px,env(safe-area-inset-top));left:16px;right:16px;text-align:center;
+  color:var(--dim);font-size:13px;letter-spacing:.02em;pointer-events:none;transition:opacity 1.2s}
+#hint.gone{opacity:0}
+
+.bar{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);
+  display:flex;flex-wrap:wrap;justify-content:center;gap:6px;padding:6px;width:max-content;max-width:calc(100% - 32px);
+  background:var(--glass);border:1px solid var(--line);border-radius:22px;
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+.bar button{appearance:none;border:0;background:transparent;color:var(--ink);font:inherit;font-size:13.5px;
+  padding:8px 13px;border-radius:16px;cursor:pointer;white-space:nowrap;transition:background .2s,color .2s}
+.bar button:hover{background:rgba(255,255,255,.08)}
+.bar button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.bar button[aria-pressed="true"]{background:rgba(255,217,160,.16);color:var(--accent)}
+
+#toast{position:fixed;left:50%;bottom:calc(max(16px,env(safe-area-inset-bottom)) + 70px);transform:translate(-50%,8px);
+  background:var(--glass);border:1px solid var(--line);border-radius:14px;padding:9px 14px;font-size:13.5px;
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);opacity:0;pointer-events:none;
+  transition:opacity .3s,transform .3s;display:flex;gap:12px;align-items:center;max-width:calc(100% - 32px)}
+#toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+#toast button{appearance:none;border:0;background:none;color:var(--accent);font:inherit;cursor:pointer;padding:0}
+
+#intro{position:fixed;inset:0;display:grid;place-items:center;padding:16px;
+  background:radial-gradient(ellipse at center,rgba(7,8,15,.35),rgba(7,8,15,.88) 70%);transition:opacity .9s}
+#intro.gone{opacity:0;pointer-events:none}
+#intro .card{width:min(420px,100%);text-align:center}
+#intro h1{margin:0 0 10px;font-weight:600;font-size:clamp(34px,8vw,52px);letter-spacing:-.02em;
+  background:linear-gradient(100deg,#c9b6ff,#ffd9a0 55%,#9fe8e0);-webkit-background-clip:text;background-clip:text;color:transparent}
+#intro p{margin:0 0 22px;color:var(--dim)}
+#intro button{appearance:none;border:1px solid rgba(255,217,160,.45);background:rgba(255,217,160,.1);color:var(--accent);
+  font:inherit;font-size:16px;padding:12px 26px;border-radius:999px;cursor:pointer}
+#intro button:hover{background:rgba(255,217,160,.18)}
+#intro small{display:block;margin-top:18px;color:var(--dim);opacity:.75;font-size:12px}
+</style>
+</head>
+<body>
+<canvas id="garden" aria-label="Sound garden. Arrow keys move, Enter plants or removes a flower, Space pauses."></canvas>
+<div id="hint">Tap to plant · drag to paint · tap a flower to let it go · tap the centre to pause</div>
+
+<div id="intro" role="dialog" aria-labelledby="introTitle">
+  <div class="card">
+    <h1 id="introTitle">Sound Garden</h1>
+    <p>Plant seeds anywhere in the circle. The sun sweeps around, and every flower it touches sings. Near the centre is low, the edge is high. Nothing you plant can sound wrong.</p>
+    <button id="enter">Enter the garden</button>
+    <small>Best with headphones</small>
+  </div>
+</div>
+
+<nav class="bar" aria-label="Garden controls">
+  <button id="bPlay" title="Space">Pause</button>
+  <button id="bScale" title="S: change scale">Pentatonic</button>
+  <button id="bTempo" title="T: change tempo">90 bpm</button>
+  <button id="bDream" aria-pressed="false" title="D: the garden grows by itself">Dream</button>
+  <button id="bShuffle" title="R">Shuffle</button>
+  <button id="bClear" title="C">Clear</button>
+  <button id="bShare">Share</button>
+</nav>
+<div id="toast" role="status" aria-live="polite"><span id="toastText"></span><button id="toastAction" hidden></button></div>
+
+<script>
+(() => {
+"use strict";
+const TAU = Math.PI * 2, STEPS = 16, RINGS = 8, LOOKAHEAD = 0.12, BASE = 196; // G3
+const SCALES = [
+  { name: "Pentatonic", notes: [0, 2, 4, 7, 9, 12, 14, 16], hue: 265 },
+  { name: "Hirajoshi",  notes: [0, 2, 3, 7, 8, 12, 14, 15], hue: 180 },
+  { name: "Lydian",     notes: [0, 4, 6, 7, 11, 12, 16, 18], hue: 28 },
+];
+const TEMPOS = [72, 90, 108, 126];
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = id => document.getElementById(id);
+
+// ---------- state ----------
+const flowers = new Map();             // key = step*RINGS+ring
+let scaleIdx = 0, tempoIdx = 1, playing = true, dream = false;
+let nextStep = 0, nextT = 0, pausedPhase = 0;
+let events = [], ripples = [], particles = [], chords = [], stars = [];
+let lastBeat = -9, dispHue = SCALES[0].hue;
+const cursor = { step: 0, ring: 3, show: false };
+const key = (s, r) => s * RINGS + r;
+const rand = n => Math.floor(Math.random() * n);
+const vnow = () => performance.now() / 1000;
+const stepDur = () => 60 / TEMPOS[tempoIdx] / 2;
+
+// ---------- layout ----------
+const cv = $("garden"), g = cv.getContext("2d");
+let W, H, cx, cy, R, r0;
+function resize() {
+  const d = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  g.setTransform(d, 0, 0, d, 0, 0);
+  const bar = W < 560 ? 128 : 88, top = 40;
+  cx = W / 2; cy = top + (H - bar - top) / 2;
+  R = Math.max(90, Math.min(W * 0.46, (H - bar - top) * 0.48));
+  r0 = R * 0.16;
+  stars = Array.from({ length: Math.round(W * H / 5000) }, () =>
+    ({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.1 + 0.2, ph: Math.random() * TAU }));
+}
+addEventListener("resize", resize); resize();
+const ringR = r => r0 + (r + 0.5) * (R - r0) / RINGS;
+const stepA = s => s / STEPS * TAU - Math.PI / 2;
+const pos = f => { const a = stepA(f.step), rr = ringR(f.ring); return [cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]; };
+
+// ---------- audio ----------
+let ac = null, bus, delay;
+const clock = () => ac ? ac.currentTime : vnow();
+function initAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  const comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -16; comp.ratio.value = 3;
+  const master = ac.createGain(); master.gain.value = 0.75;
+  master.connect(comp); comp.connect(ac.destination);
+
+  const verb = ac.createConvolver();
+  const n = ac.sampleRate * 3.4, buf = ac.createBuffer(2, n, ac.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 3.2); }
+  verb.buffer = buf;
+  const verbOut = ac.createGain(); verbOut.gain.value = 0.42; verb.connect(verbOut); verbOut.connect(master);
+
+  delay = ac.createDelay(3); delay.delayTime.value = stepDur() * 3;
+  const fb = ac.createGain(); fb.gain.value = 0.33;
+  const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 2000;
+  delay.connect(lp); lp.connect(fb); fb.connect(delay);
+  const dOut = ac.createGain(); dOut.gain.value = 0.28; lp.connect(dOut); dOut.connect(master); dOut.connect(verb);
+
+  bus = ac.createGain(); bus.connect(master); bus.connect(verb); bus.connect(delay);
+}
+function voice(ring, at, pan, level) {
+  if (!ac) return;
+  const f = BASE * Math.pow(2, SCALES[scaleIdx].notes[ring] / 12), end = at + 2.4;
+  const env = ac.createGain();
+  env.gain.setValueAtTime(0.0001, at);
+  env.gain.exponentialRampToValueAtTime(0.2 * level, at + 0.012);
+  env.gain.exponentialRampToValueAtTime(0.0001, end - 0.1);
+  const lp = ac.createBiquadFilter(); lp.type = "lowpass";
+  lp.frequency.setValueAtTime(f * 9, at); lp.frequency.exponentialRampToValueAtTime(f * 1.6, at + 1.3);
+  const o1 = ac.createOscillator(); o1.frequency.value = f;
+  const o2 = ac.createOscillator(); o2.type = "triangle"; o2.frequency.value = f * 2; o2.detune.value = 5;
+  const g2 = ac.createGain(); g2.gain.value = 0.22;
+  const o3 = ac.createOscillator(); o3.frequency.value = f * 4.03;     // glassy bell partial
+  const g3 = ac.createGain(); g3.gain.setValueAtTime(0.14, at); g3.gain.exponentialRampToValueAtTime(0.0001, at + 0.45);
+  o1.connect(lp); o2.connect(g2); g2.connect(lp); o3.connect(g3); g3.connect(lp); lp.connect(env);
+  if (ac.createStereoPanner) { const p = ac.createStereoPanner(); p.pan.value = pan; env.connect(p); p.connect(bus); }
+  else env.connect(bus);
+  for (const o of [o1, o2, o3]) { o.start(at); o.stop(end); }
+}
+
+// ---------- sequencer ----------
+function phase() {
+  if (!playing) return pausedPhase;
+  const p = (nextStep - (nextT - clock()) / stepDur()) / STEPS;
+  return ((p % 1) + 1) % 1;
+}
+function reanchor(x) {                 // keep the sun where it is (x in steps) after a clock or tempo change
+  const d = (((nextStep - x) % STEPS) + STEPS) % STEPS;
+  nextT = clock() + d * stepDur();
+}
+function schedule() {
+  if (!playing) return;
+  const t = clock();
+  if (nextT < t - 0.25) reanchor(phase() * STEPS);   // tab was asleep: skip, don't burst
+  while (nextT < t + LOOKAHEAD) {
+    fireStep(nextStep, nextT);
+    nextStep = (nextStep + 1) % STEPS;
+    nextT += stepDur();
+  }
+}
+function fireStep(s, at) {
+  if (s === 0 && dream) dreamTick(at);
+  const here = [];
+  for (let r = 0; r < RINGS; r++) { const f = flowers.get(key(s, r)); if (f && f.dying < 0) here.push(f); }
+  const level = 1 / Math.sqrt(Math.max(1, here.length));
+  for (const f of here) {
+    voice(f.ring, at, Math.cos(stepA(s)) * 0.7, level);
+    events.push({ type: "hit", k: key(f.step, f.ring), at });
+  }
+  if (here.length > 1) events.push({ type: "chord", ks: here.map(f => key(f.step, f.ring)), at });
+  if (s % 4 === 0) events.push({ type: "beat", at });
+}
+setInterval(schedule, 25);
+
+// ---------- garden ----------
+function plant(s, r, born = vnow(), preview = false) {
+  const k = key(s, r), f = flowers.get(k);
+  if (f) { f.dying = -1; return; }
+  flowers.set(k, { step: s, ring: r, born, hit: -1, dying: -1 });
+  if (preview && ac) {
+    voice(r, ac.currentTime + 0.01, Math.cos(stepA(s)) * 0.7, 0.7);
+    const [x, y] = pos({ step: s, ring: r });
+    ripples.push({ x, y, t: vnow(), hue: hueOf(s, r) });
+  }
+}
+function uproot(f) { if (f.dying < 0) f.dying = vnow(); }
+const alive = () => [...flowers.values()].filter(f => f.dying < 0);
+function dreamTick(at) {
+  setTimeout(() => {
+    const live = alive();
+    if (live.length >= 18 || (live.length > 7 && Math.random() < 0.4)) uproot(live[rand(live.length)]);
+    if (live.length < 18) {
+      let s = rand(STEPS), r = rand(RINGS);
+      if (live.length && Math.random() < 0.8) {   // grow near a neighbour so it stays melodic
+        const b = live[rand(live.length)];
+        s = (b.step + [1, 2, 3, -1, -2, 4][rand(6)] + STEPS) % STEPS;
+        r = Math.max(0, Math.min(RINGS - 1, b.ring + rand(5) - 2));
+      }
+      plant(s, r);
+    }
+    saveHash();
+  }, Math.max(0, (at - clock()) * 1000));
+}
+function shuffle() {
+  for (const f of flowers.values()) uproot(f);
+  const t = vnow(); let i = 0;
+  let r = rand(RINGS);
+  for (let s = 0; s < STEPS; s++) {
+    if (Math.random() < 0.62) {
+      r = Math.max(0, Math.min(RINGS - 1, r + rand(5) - 2));    // a wandering melody line
+      plant(s, r, t + 0.3 + i++ * 0.06);
+      if (Math.random() < 0.18) plant(s, (r + 2 + rand(3)) % RINGS, t + 0.3 + i++ * 0.06);
+    }
+  }
+  saveHash();
+}
+
+// ---------- share links ----------
+function encode() {
+  const b = new Uint8Array(STEPS);
+  for (const f of alive()) b[f.step] |= 1 << f.ring;
+  return "v1." + btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") + "." + scaleIdx + "." + tempoIdx;
+}
+function decode(h) {
+  try {
+    const [v, data, sc, te] = h.replace(/^#/, "").split(".");
+    if (v !== "v1") return false;
+    const bin = atob(data.replace(/-/g, "+").replace(/_/g, "/"));
+    if (bin.length !== STEPS) return false;
+    const t = vnow(); let i = 0;
+    for (let s = 0; s < STEPS; s++) for (let r = 0; r < RINGS; r++)
+      if (bin.charCodeAt(s) & (1 << r)) plant(s, r, t + 0.4 + i++ * 0.05);
+    scaleIdx = Math.min(SCALES.length - 1, Math.max(0, +sc || 0));
+    tempoIdx = Math.min(TEMPOS.length - 1, Math.max(0, +te || 0));
+    dispHue = SCALES[scaleIdx].hue;
+    return true;
+  } catch { return false; }
+}
+let hashTimer;
+function saveHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => { try { history.replaceState(null, "", "#" + encode()); } catch {} }, 300);
+}
+
+// ---------- drawing ----------
+const hueOf = (s, r) => (dispHue + s * 14 + r * 7) % 360;
+function frame() {
+  const now = vnow(), t = clock();
+  // smooth hue drift when the scale changes
+  const target = SCALES[scaleIdx].hue;
+  let dh = ((target - dispHue + 540) % 360) - 180;
+  dispHue = (dispHue + dh * 0.04 + 360) % 360;
+
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.at > t) continue;
+    events.splice(i, 1);
+    if (e.type === "beat") lastBeat = now;
+    else if (e.type === "chord") chords.push({ ks: e.ks, t: now });
+    else {
+      const f = flowers.get(e.k);
+      if (!f || f.dying >= 0) continue;
+      f.hit = now;
+      const [x, y] = pos(f), hue = hueOf(f.step, f.ring);
+      ripples.push({ x, y, t: now, hue });
+      if (!reduce) for (let j = 0; j < 7; j++) {
+        const a = Math.random() * TAU, v = 14 + Math.random() * 34;
+        particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 8, t: now, hue });
+      }
+    }
+  }
+
+  // sky
+  g.globalCompositeOperation = "source-over";
+  g.fillStyle = "#07080f"; g.fillRect(0, 0, W, H);
+  const sky = g.createRadialGradient(cx, cy, R * 0.1, cx, cy, Math.max(W, H) * 0.75);
+  sky.addColorStop(0, `hsla(${dispHue},55%,22%,.55)`);
+  sky.addColorStop(0.5, `hsla(${(dispHue + 40) % 360},50%,12%,.25)`);
+  sky.addColorStop(1, "rgba(7,8,15,0)");
+  g.fillStyle = sky; g.fillRect(0, 0, W, H);
+  for (const s of stars) {
+    g.globalAlpha = reduce ? 0.4 : 0.25 + 0.3 * Math.sin(now * 0.6 + s.ph) ** 2;
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(s.x, s.y, s.r, 0, TAU); g.fill();
+  }
+  g.globalAlpha = 1;
+
+  // the garden bed
+  g.lineWidth = 1;
+  for (let r = 0; r < RINGS; r++) {
+    g.strokeStyle = `rgba(255,255,255,${0.035 + (r % 2) * 0.015})`;
+    g.beginPath(); g.arc(cx, cy, ringR(r), 0, TAU); g.stroke();
+  }
+  g.strokeStyle = "rgba(255,255,255,.13)"; g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke();
+  g.fillStyle = "rgba(255,255,255,.09)";
+  for (let s = 0; s < STEPS; s++) for (let r = 0; r < RINGS; r++) {
+    const a = stepA(s), rr = ringR(r);
+    g.beginPath(); g.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, s % 4 === 0 ? 1.6 : 1.1, 0, TAU); g.fill();
+  }
+
+  // the sun's sweep
+  const ang = stepA(0) + phase() * TAU, trail = 1.15;
+  g.globalCompositeOperation = "lighter";
+  g.beginPath(); g.moveTo(cx, cy); g.arc(cx, cy, R, ang - trail, ang); g.closePath();
+  if (g.createConicGradient) {
+    const cg = g.createConicGradient(ang - trail, cx, cy);
+    cg.addColorStop(0, "rgba(255,214,160,0)");
+    cg.addColorStop(trail / TAU, "rgba(255,214,160,.17)");
+    cg.addColorStop(Math.min(1, trail / TAU + 0.001), "rgba(255,214,160,0)");
+    g.fillStyle = cg;
+  } else g.fillStyle = "rgba(255,214,160,.05)";
+  g.fill();
+  g.strokeStyle = "rgba(255,228,190,.6)"; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0);
+  g.lineTo(cx + Math.cos(ang) * R, cy + Math.sin(ang) * R); g.stroke();
+  const sx = cx + Math.cos(ang) * R, sy = cy + Math.sin(ang) * R;
+  const sg = g.createRadialGradient(sx, sy, 0, sx, sy, 18);
+  sg.addColorStop(0, "rgba(255,236,200,.95)"); sg.addColorStop(0.3, "rgba(255,200,130,.4)"); sg.addColorStop(1, "rgba(255,180,100,0)");
+  g.fillStyle = sg; g.beginPath(); g.arc(sx, sy, 18, 0, TAU); g.fill();
+
+  // constellations between notes that sound together
+  for (let i = chords.length - 1; i >= 0; i--) {
+    const c = chords[i], k = Math.exp(-(now - c.t) * 2.2);
+    if (k < 0.02) { chords.splice(i, 1); continue; }
+    const pts = c.ks.map(x => flowers.get(x)).filter(Boolean).map(pos);
+    g.strokeStyle = `rgba(255,240,220,${0.4 * k})`; g.lineWidth = 1;
+    g.beginPath(); pts.forEach(([x, y], j) => j ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke();
+  }
+
+  // ripples
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const rp = ripples[i], k = (now - rp.t) / 1.3;
+    if (k >= 1) { ripples.splice(i, 1); continue; }
+    g.strokeStyle = `hsla(${rp.hue},90%,72%,${0.5 * (1 - k) ** 2})`; g.lineWidth = 1.5;
+    g.beginPath(); g.arc(rp.x, rp.y, 8 + k * (reduce ? 22 : 54), 0, TAU); g.stroke();
+  }
+
+  // flowers
+  const cell = (R - r0) / RINGS;
+  for (const [k, f] of flowers) {
+    let grow = Math.max(0, Math.min(1, (now - f.born) / 0.9));
+    grow = 1 - (1 - grow) ** 3;
+    if (f.dying >= 0) {
+      const left = 1 - (now - f.dying) / 0.7;
+      if (left <= 0) { flowers.delete(k); continue; }
+      grow *= left * left;
+    }
+    if (grow <= 0) continue;
+    const [x, y] = pos(f), hue = hueOf(f.step, f.ring);
+    const pulse = f.hit < 0 ? 0 : Math.exp(-(now - f.hit) * 4.5) * (reduce ? 0.4 : 1);
+    const size = Math.min(cell * 0.46, 16) * grow * (1 + 0.55 * pulse);
+    const halo = g.createRadialGradient(x, y, 0, x, y, size * (2.2 + 2.5 * pulse));
+    halo.addColorStop(0, `hsla(${hue},95%,70%,${0.18 + 0.5 * pulse})`); halo.addColorStop(1, `hsla(${hue},95%,60%,0)`);
+    g.globalCompositeOperation = "lighter";
+    g.fillStyle = halo; g.beginPath(); g.arc(x, y, size * (2.2 + 2.5 * pulse), 0, TAU); g.fill();
+    g.globalCompositeOperation = "source-over";
+    const n = 5 + (f.ring % 3), spin = reduce ? 0 : now * 0.18 * (f.ring % 2 ? 1 : -1);
+    g.save(); g.translate(x, y); g.rotate(spin + f.step * 0.7);
+    g.fillStyle = `hsla(${hue},80%,${60 + pulse * 18}%,.92)`;
+    for (let i = 0; i < n; i++) {
+      g.rotate(TAU / n); g.beginPath(); g.ellipse(size * 0.55, 0, size * 0.56, size * 0.25, 0, 0, TAU); g.fill();
+    }
+    g.fillStyle = `hsla(${(hue + 45) % 360},100%,${82 + pulse * 14}%,1)`;
+    g.beginPath(); g.arc(0, 0, size * 0.22, 0, TAU); g.fill();
+    g.restore();
+  }
+
+  // pollen
+  g.globalCompositeOperation = "lighter";
+  const dt = Math.min(0.05, now - (frame.last || now)); frame.last = now;
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i], k = (now - p.t) / 1.7;
+    if (k >= 1) { particles.splice(i, 1); continue; }
+    p.vx *= 0.97; p.vy = p.vy * 0.97 - 6 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    g.fillStyle = `hsla(${p.hue},100%,80%,${0.8 * (1 - k)})`;
+    g.beginPath(); g.arc(p.x, p.y, 1.4, 0, TAU); g.fill();
+  }
+
+  // the seed at the centre (tap it to pause)
+  const bp = Math.exp(-(now - lastBeat) * 5) * (playing ? 1 : 0);
+  const cr = r0 * (0.55 + 0.12 * bp);
+  const core = g.createRadialGradient(cx, cy, 0, cx, cy, cr * 2.2);
+  core.addColorStop(0, `rgba(255,232,190,${0.75 + 0.25 * bp})`); core.addColorStop(0.35, "rgba(255,190,120,.28)"); core.addColorStop(1, "rgba(255,170,100,0)");
+  g.fillStyle = core; g.beginPath(); g.arc(cx, cy, cr * 2.2, 0, TAU); g.fill();
+  g.globalCompositeOperation = "source-over";
+  if (!playing) {
+    g.fillStyle = "rgba(40,28,10,.75)";
+    g.fillRect(cx - cr * 0.32, cy - cr * 0.34, cr * 0.2, cr * 0.68);
+    g.fillRect(cx + cr * 0.12, cy - cr * 0.34, cr * 0.2, cr * 0.68);
+  }
+
+  // keyboard cursor
+  if (cursor.show) {
+    const a = stepA(cursor.step), rr = ringR(cursor.ring);
+    g.setLineDash([3, 4]); g.strokeStyle = "rgba(255,217,160,.85)"; g.lineWidth = 1.5;
+    g.beginPath(); g.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, Math.min(cell * 0.5, 18), 0, TAU); g.stroke();
+    g.setLineDash([]);
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------- input ----------
+function cellAt(x, y) {
+  const dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy);
+  if (d < r0 * 0.85) return "core";
+  if (d > R * 1.06) return null;
+  const ring = Math.max(0, Math.min(RINGS - 1, Math.floor((d - r0) / (R - r0) * RINGS)));
+  let a = Math.atan2(dy, dx) + Math.PI / 2; if (a < 0) a += TAU;
+  return { step: Math.round(a / TAU * STEPS) % STEPS, ring };
+}
+let painting = null, lastCell = -1;
+function touch() {
+  if (ac && ac.state === "suspended") ac.resume();
+  $("hint").classList.add("gone");
+}
+cv.addEventListener("pointerdown", e => {
+  touch(); cursor.show = false;
+  const c = cellAt(e.clientX, e.clientY);
+  if (c === "core") { togglePlay(); return; }
+  if (!c) return;
+  const f = flowers.get(key(c.step, c.ring));
+  painting = f && f.dying < 0 ? "remove" : "add";
+  lastCell = -1; paint(c);
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", e => {
+  if (!painting) return;
+  const c = cellAt(e.clientX, e.clientY);
+  if (c && c !== "core") paint(c);
+});
+const endPaint = () => { if (painting) saveHash(); painting = null; };
+cv.addEventListener("pointerup", endPaint);
+cv.addEventListener("pointercancel", endPaint);
+function paint(c) {
+  const k = key(c.step, c.ring);
+  if (k === lastCell) return;
+  lastCell = k;
+  const f = flowers.get(k), live = f && f.dying < 0;
+  if (painting === "add" && !live) plant(c.step, c.ring, vnow(), true);
+  if (painting === "remove" && live) uproot(f);
+}
+
+addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const onButton = e.target instanceof HTMLButtonElement;
+  if (onButton && (e.key === " " || e.key === "Enter")) return;
+  const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+  if (moves[e.key]) {
+    e.preventDefault(); touch();
+    if (cursor.show) {
+      cursor.step = (cursor.step + moves[e.key][0] + STEPS) % STEPS;
+      cursor.ring = Math.max(0, Math.min(RINGS - 1, cursor.ring + moves[e.key][1]));
+    }
+    cursor.show = true; return;
+  }
+  const k = e.key.toLowerCase();
+  if (e.key === "Enter") {
+    touch(); cursor.show = true;
+    const f = flowers.get(key(cursor.step, cursor.ring));
+    if (f && f.dying < 0) uproot(f); else plant(cursor.step, cursor.ring, vnow(), true);
+    saveHash();
+  } else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (k === "s") nextScale();
+  else if (k === "t") nextTempo();
+  else if (k === "d") toggleDream();
+  else if (k === "r") shuffle();
+  else if (k === "c") clearGarden();
+  else if (k === "p") savePicture();
+});
+
+// ---------- controls ----------
+function togglePlay() {
+  if (playing) { pausedPhase = phase(); playing = false; events = events.filter(e => e.at <= clock()); }
+  else { playing = true; reanchor(pausedPhase * STEPS); }
+  $("bPlay").textContent = playing ? "Pause" : "Play";
+}
+function nextScale() {
+  scaleIdx = (scaleIdx + 1) % SCALES.length;
+  $("bScale").textContent = SCALES[scaleIdx].name; saveHash();
+}
+function nextTempo() {
+  const x = phase() * STEPS;
+  tempoIdx = (tempoIdx + 1) % TEMPOS.length;
+  if (playing) reanchor(x);
+  if (delay) delay.delayTime.setTargetAtTime(stepDur() * 3, ac.currentTime, 0.15);
+  $("bTempo").textContent = TEMPOS[tempoIdx] + " bpm"; saveHash();
+}
+function toggleDream() {
+  dream = !dream;
+  $("bDream").setAttribute("aria-pressed", dream);
+  toast(dream ? "Dreaming. The garden grows and fades by itself." : "Awake. The garden is yours again.");
+}
+function clearGarden() {
+  const before = alive().map(f => [f.step, f.ring]);
+  if (!before.length) return;
+  for (const f of flowers.values()) uproot(f);
+  saveHash();
+  toast("Garden cleared", "Undo", () => { const t = vnow(); before.forEach(([s, r], i) => plant(s, r, t + i * 0.03)); saveHash(); });
+}
+async function share() {
+  try { history.replaceState(null, "", "#" + encode()); } catch {}
+  const url = location.href;
+  try {
+    if (navigator.share && matchMedia("(pointer: coarse)").matches) { await navigator.share({ title: "Sound Garden", url }); return; }
+    await navigator.clipboard.writeText(url);
+    toast("Link copied. Anyone who opens it hears your garden.");
+  } catch { toast("Copy this page's address to share your garden."); }
+}
+function savePicture() {
+  cv.toBlob(b => {
+    if (!b) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "sound-garden.png"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+let toastTimer;
+function toast(text, actionLabel, action) {
+  $("toastText").textContent = text;
+  const btn = $("toastAction");
+  btn.hidden = !actionLabel;
+  btn.textContent = actionLabel || "";
+  btn.onclick = () => { action && action(); $("toast").classList.remove("show"); };
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), actionLabel ? 5000 : 2800);
+}
+$("bPlay").onclick = togglePlay;
+$("bScale").onclick = nextScale;
+$("bTempo").onclick = nextTempo;
+$("bDream").onclick = toggleDream;
+$("bShuffle").onclick = shuffle;
+$("bClear").onclick = clearGarden;
+$("bShare").onclick = share;
+$("enter").onclick = () => {
+  const x = phase() * STEPS;
+  initAudio();
+  events = [];
+  reanchor(x);                         // hand the sun from the silent clock to the audio clock
+  ac.resume();
+  $("intro").classList.add("gone");
+  setTimeout(() => $("intro").remove(), 1000);
+};
+
+// ---------- first garden ----------
+if (!decode(location.hash)) {
+  const t = vnow();
+  [[0, 0], [0, 4], [2, 2], [3, 5], [4, 3], [6, 4], [7, 6], [8, 1], [8, 5], [10, 3], [11, 7], [12, 2], [13, 4], [14, 6], [15, 5]]
+    .forEach(([s, r], i) => plant(s, r, t + 0.6 + i * 0.12));
+}
+$("bScale").textContent = SCALES[scaleIdx].name;
+$("bTempo").textContent = TEMPOS[tempoIdx] + " bpm";
+nextT = clock() + 0.1;
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
