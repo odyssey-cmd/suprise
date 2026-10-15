@@ -14,6 +14,7 @@ Open `index.html` in a browser. It is one file, with no install, no build step a
 | Drag | Paints a run of flowers, or clears them if you started on one |
 | Tap the glowing centre, or press Space | Pause and play |
 | **Pentatonic / Hirajoshi / Lydian** (S) | Changes the scale and the garden's colours |
+| **Glass / Sine / Music box / Marimba / Harp / Flute / Warm pad** (I) | Changes the instrument |
 | **bpm** (T) | Cycles through 72, 90, 108 and 126 bpm |
 | **Dream** (D) | The garden plants and lets go of flowers by itself, so the tune slowly drifts |
 | **Shuffle** (R) | Grows a new random melody |
@@ -30,5 +31,5 @@ It respects the "reduce motion" setting by turning off the pollen and keeping pu
 
 - The circle is a 16-step sequencer with 8 rings. Each ring is one note of the current scale.
 - Notes are scheduled slightly ahead on the Web Audio clock, so timing stays tight even when the page is busy. The sun's position comes from that same clock, so what you see lines up with what you hear.
-- Each note is a sine wave, a soft triangle wave an octave up and a short bell-like overtone, passed through a closing filter. Everything then goes through a feedback delay and a reverb built from noise at start-up.
-- A shared garden is stored in the URL itself (`#v1.<16 bytes as base64>.<scale>.<tempo>`), so nothing is ever uploaded.
+- Every instrument is synthesized live, with no sample files. Glass, Sine, Music box and Marimba are stacks of sine partials, each decaying at its own rate (a marimba bar rings two octaves up, and a music-box tine has a quick metallic tick). Harp is a Karplus-Strong plucked string rendered once per pitch. Flute is a sine wave with vibrato that arrives late plus filtered breath noise, and Warm pad is two detuned sawtooth waves through a low-pass filter. Everything goes through a feedback delay and a reverb built from noise at start-up.
+- A shared garden is stored in the URL itself (`#v1.<16 bytes as base64>.<scale>.<tempo>.<instrument>`), so nothing is ever uploaded.

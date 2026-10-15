@@ -70,6 +70,7 @@ canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none;cursor:cr
 <nav class="bar" aria-label="Garden controls">
   <button id="bPlay" title="Space">Pause</button>
   <button id="bScale" title="S: change scale">Pentatonic</button>
+  <button id="bInst" title="I: change instrument">Glass</button>
   <button id="bTempo" title="T: change tempo">90 bpm</button>
   <button id="bDream" aria-pressed="false" title="D: the garden grows by itself">Dream</button>
   <button id="bShuffle" title="R">Shuffle</button>
@@ -106,7 +107,7 @@ const stepDur = () => 60 / TEMPOS[tempoIdx] / 2;
 const SHARPS = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const FLATS  = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
 function noteName(ring) {                // BASE is G3, MIDI 55
-  const sc = SCALES[scaleIdx], m = 55 + sc.notes[ring];
+  const sc = SCALES[scaleIdx], m = 55 + sc.notes[ring] + 12 * (INSTRUMENTS[instIdx].oct || 0);
   return (sc.flats ? FLATS : SHARPS)[m % 12] + (Math.floor(m / 12) - 1);
 }
 
@@ -154,24 +155,106 @@ function initAudio() {
 
   bus = ac.createGain(); bus.connect(master); bus.connect(verb); bus.connect(delay);
 }
+// one partial with its own swell and decay: the building block of struck and plucked sounds
+function partial(dest, type, f, gain, at, attack, decay) {
+  const o = ac.createOscillator(), gn = ac.createGain();
+  o.type = type; o.frequency.value = f;
+  gn.gain.setValueAtTime(0.0001, at);
+  gn.gain.exponentialRampToValueAtTime(gain, at + attack);
+  gn.gain.exponentialRampToValueAtTime(0.0001, at + attack + decay);
+  o.connect(gn); gn.connect(dest);
+  o.start(at); o.stop(at + attack + decay + 0.05);
+  return o;
+}
+const bufs = new Map();
+function pluckBuffer(f) {                // Karplus-Strong string, rendered once per pitch
+  const k = "p" + f.toFixed(2);
+  if (bufs.has(k)) return bufs.get(k);
+  const sr = ac.sampleRate, N = Math.max(2, Math.floor(sr / f - 0.5)), len = Math.floor(sr * 2.4);
+  const b = ac.createBuffer(1, len, sr), y = b.getChannelData(0);
+  let prev = 0;
+  for (let i = 0; i < N; i++) { const r = Math.random() * 2 - 1; y[i] = (r + prev) / 2; prev = r; }
+  y[N] = y[0] * 0.996;
+  for (let i = N + 1; i < len; i++) y[i] = 0.4985 * (y[i - N] + y[i - N - 1]);
+  const out = { buf: b, rate: f / (sr / (N + 0.5)) };   // the averaging adds half a sample of delay
+  bufs.set(k, out); return out;
+}
+function noiseBuffer() {
+  if (bufs.has("noise")) return bufs.get("noise");
+  const b = ac.createBuffer(1, ac.sampleRate, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  bufs.set("noise", b); return b;
+}
+const INSTRUMENTS = [
+  { name: "Glass", play(f, at, out, v) {
+    const env = ac.createGain();
+    env.gain.setValueAtTime(0.0001, at);
+    env.gain.exponentialRampToValueAtTime(0.2 * v, at + 0.012);
+    env.gain.exponentialRampToValueAtTime(0.0001, at + 2.3);
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass";
+    lp.frequency.setValueAtTime(f * 9, at); lp.frequency.exponentialRampToValueAtTime(f * 1.6, at + 1.3);
+    lp.connect(env); env.connect(out);
+    partial(lp, "sine", f, 1, at, 0.001, 2.3);
+    partial(lp, "triangle", f * 2, 0.22, at, 0.001, 2.3).detune.value = 5;
+    partial(lp, "sine", f * 4.03, 0.14, at, 0.001, 0.45);       // glassy bell partial
+  } },
+  { name: "Sine", play(f, at, out, v) {
+    partial(out, "sine", f, 0.26 * v, at, 0.015, 1.9);
+  } },
+  { name: "Music box", oct: 1, play(f, at, out, v) {
+    partial(out, "sine", f, 0.2 * v, at, 0.003, 1.6);
+    partial(out, "sine", f * 2, 0.045 * v, at, 0.002, 0.5);
+    partial(out, "sine", f * 5.4, 0.035 * v, at, 0.001, 0.12);    // the tine's metallic tick
+  } },
+  { name: "Marimba", play(f, at, out, v) {
+    partial(out, "sine", f, 0.34 * v, at, 0.004, 0.95);
+    partial(out, "sine", f * 4, 0.09 * v, at, 0.002, 0.22);       // tuned bars ring two octaves up
+    partial(out, "sine", f * 9.9, 0.03 * v, at, 0.001, 0.05);     // mallet knock
+  } },
+  { name: "Harp", play(f, at, out, v) {
+    const { buf, rate } = pluckBuffer(f);
+    const src = ac.createBufferSource(), gn = ac.createGain(), lp = ac.createBiquadFilter();
+    src.buffer = buf; src.playbackRate.value = rate;
+    lp.type = "lowpass"; lp.frequency.value = Math.min(9000, f * 12);
+    gn.gain.value = 0.42 * v;
+    src.connect(lp); lp.connect(gn); gn.connect(out); src.start(at);
+  } },
+  { name: "Flute", play(f, at, out, v) {
+    const env = ac.createGain();
+    env.gain.setValueAtTime(0.0001, at);
+    env.gain.exponentialRampToValueAtTime(0.27 * v, at + 0.09);
+    env.gain.setTargetAtTime(0.18 * v, at + 0.09, 0.3);
+    env.gain.exponentialRampToValueAtTime(0.0001, at + 1.7);
+    env.connect(out);
+    const o = partial(env, "sine", f, 1, at, 0.001, 1.7);
+    partial(env, "triangle", f, 0.12, at, 0.001, 1.7);
+    const lfo = ac.createOscillator(), depth = ac.createGain();      // vibrato that arrives late, like a player's
+    lfo.frequency.value = 5.2; depth.gain.setValueAtTime(0, at); depth.gain.linearRampToValueAtTime(f * 0.007, at + 0.45);
+    lfo.connect(depth); depth.connect(o.frequency); lfo.start(at); lfo.stop(at + 1.8);
+    const n = ac.createBufferSource(), bp = ac.createBiquadFilter(), ng = ac.createGain();  // breath
+    n.buffer = noiseBuffer(); bp.type = "bandpass"; bp.frequency.value = f * 2; bp.Q.value = 1.2;
+    ng.gain.setValueAtTime(0.0001, at); ng.gain.exponentialRampToValueAtTime(0.09 * v, at + 0.03);
+    ng.gain.exponentialRampToValueAtTime(0.0001, at + 0.35);
+    n.connect(bp); bp.connect(ng); ng.connect(out); n.start(at); n.stop(at + 0.4);
+  } },
+  { name: "Warm pad", play(f, at, out, v) {
+    const env = ac.createGain(), lp = ac.createBiquadFilter();
+    lp.type = "lowpass"; lp.frequency.value = 700 + f; lp.Q.value = 0.7;
+    env.gain.setValueAtTime(0.0001, at);
+    env.gain.exponentialRampToValueAtTime(0.24 * v, at + 0.35);
+    env.gain.exponentialRampToValueAtTime(0.0001, at + 3.2);
+    lp.connect(env); env.connect(out);
+    for (const dt of [-8, 8]) partial(lp, "sawtooth", f, 1, at, 0.001, 3.2).detune.value = dt;
+  } },
+];
+let instIdx = 0;
 function voice(ring, at, pan, level) {
   if (!ac) return;
-  const f = BASE * Math.pow(2, SCALES[scaleIdx].notes[ring] / 12), end = at + 2.4;
-  const env = ac.createGain();
-  env.gain.setValueAtTime(0.0001, at);
-  env.gain.exponentialRampToValueAtTime(0.2 * level, at + 0.012);
-  env.gain.exponentialRampToValueAtTime(0.0001, end - 0.1);
-  const lp = ac.createBiquadFilter(); lp.type = "lowpass";
-  lp.frequency.setValueAtTime(f * 9, at); lp.frequency.exponentialRampToValueAtTime(f * 1.6, at + 1.3);
-  const o1 = ac.createOscillator(); o1.frequency.value = f;
-  const o2 = ac.createOscillator(); o2.type = "triangle"; o2.frequency.value = f * 2; o2.detune.value = 5;
-  const g2 = ac.createGain(); g2.gain.value = 0.22;
-  const o3 = ac.createOscillator(); o3.frequency.value = f * 4.03;     // glassy bell partial
-  const g3 = ac.createGain(); g3.gain.setValueAtTime(0.14, at); g3.gain.exponentialRampToValueAtTime(0.0001, at + 0.45);
-  o1.connect(lp); o2.connect(g2); g2.connect(lp); o3.connect(g3); g3.connect(lp); lp.connect(env);
-  if (ac.createStereoPanner) { const p = ac.createStereoPanner(); p.pan.value = pan; env.connect(p); p.connect(bus); }
-  else env.connect(bus);
-  for (const o of [o1, o2, o3]) { o.start(at); o.stop(end); }
+  const inst = INSTRUMENTS[instIdx];
+  const f = BASE * Math.pow(2, SCALES[scaleIdx].notes[ring] / 12 + (inst.oct || 0));
+  let out = bus;
+  if (ac.createStereoPanner) { out = ac.createStereoPanner(); out.pan.value = pan; out.connect(bus); }
+  inst.play(f, at, out, level);
 }
 
 // ---------- sequencer ----------
@@ -255,11 +338,11 @@ function shuffle() {
 function encode() {
   const b = new Uint8Array(STEPS);
   for (const f of alive()) b[f.step] |= 1 << f.ring;
-  return "v1." + btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") + "." + scaleIdx + "." + tempoIdx;
+  return "v1." + btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") + "." + scaleIdx + "." + tempoIdx + "." + instIdx;
 }
 function decode(h) {
   try {
-    const [v, data, sc, te] = h.replace(/^#/, "").split(".");
+    const [v, data, sc, te, ins] = h.replace(/^#/, "").split(".");
     if (v !== "v1") return false;
     const bin = atob(data.replace(/-/g, "+").replace(/_/g, "/"));
     if (bin.length !== STEPS) return false;
@@ -268,6 +351,7 @@ function decode(h) {
       if (bin.charCodeAt(s) & (1 << r)) plant(s, r, t + 0.4 + i++ * 0.05);
     scaleIdx = Math.min(SCALES.length - 1, Math.max(0, +sc || 0));
     tempoIdx = Math.min(TEMPOS.length - 1, Math.max(0, +te || 0));
+    instIdx = Math.min(INSTRUMENTS.length - 1, Math.max(0, +ins || 0));
     dispHue = SCALES[scaleIdx].hue;
     return true;
   } catch { return false; }
@@ -531,6 +615,7 @@ addEventListener("keydown", e => {
     saveHash();
   } else if (e.key === " ") { e.preventDefault(); togglePlay(); }
   else if (k === "s") nextScale();
+  else if (k === "i") nextInstrument();
   else if (k === "t") nextTempo();
   else if (k === "d") toggleDream();
   else if (k === "r") shuffle();
@@ -547,6 +632,11 @@ function togglePlay() {
 function nextScale() {
   scaleIdx = (scaleIdx + 1) % SCALES.length;
   $("bScale").textContent = SCALES[scaleIdx].name; saveHash();
+}
+function nextInstrument() {
+  instIdx = (instIdx + 1) % INSTRUMENTS.length;
+  $("bInst").textContent = INSTRUMENTS[instIdx].name; saveHash();
+  if (ac) voice(4, ac.currentTime + 0.01, 0, 0.8);   // a taste of the new sound
 }
 function nextTempo() {
   const x = phase() * STEPS;
@@ -597,6 +687,7 @@ function toast(text, actionLabel, action) {
 }
 $("bPlay").onclick = togglePlay;
 $("bScale").onclick = nextScale;
+$("bInst").onclick = nextInstrument;
 $("bTempo").onclick = nextTempo;
 $("bDream").onclick = toggleDream;
 $("bShuffle").onclick = shuffle;
@@ -619,6 +710,7 @@ if (!decode(location.hash)) {
     .forEach(([s, r], i) => plant(s, r, t + 0.6 + i * 0.12));
 }
 $("bScale").textContent = SCALES[scaleIdx].name;
+$("bInst").textContent = INSTRUMENTS[instIdx].name;
 $("bTempo").textContent = TEMPOS[tempoIdx] + " bpm";
 nextT = clock() + 0.1;
 requestAnimationFrame(frame);
